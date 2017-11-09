@@ -21,17 +21,17 @@
 #include "rgb.h"
 #include "light.h"
 #include "temp.h"
-static uint8_t barPos = 2;
+
+#define HI_TEMP_THRESHOLD 280
+#define HI_ACC_THRESHOLD 0.4
 
 volatile uint32_t msTicks = 0;
+volatile uint32_t modeTimer = 0;
 uint8_t oled_disp[40] = {};
 int myintsw3 = 0;
 
 //button for switching mode
 volatile int MODE_TOGGLE= 0, MODE_TOGGLE1 = 0;
-
-//light_flag
-volatile int light_flag = 0;
 
 //SYS Modes
 typedef enum {
@@ -39,25 +39,9 @@ typedef enum {
 } system_mode_t;
 volatile system_mode_t mode;
 
-const uint32_t lightLoLimit = 50, lightHiLimit = 3891;
-
-static void moveBar(uint8_t steps, uint8_t dir)
-{
-    uint16_t ledOn = 0;
-
-    if (barPos == 0)
-        ledOn = (1 << 0) | (3 << 14);
-    else if (barPos == 1)
-        ledOn = (3 << 0) | (1 << 15);
-    else
-        ledOn = 0x07 << (barPos-2);
-
-    barPos += (dir*steps);
-    barPos = (barPos % 16);
-
-    pca9532_setLeds(ledOn, 0xffff);
-}
-
+//light flag
+//volatile int light_flag = 0;
+//const uint32_t lightLoLimit = 50, lightHiLimit = 3000;
 
 static void drawOled(uint8_t joyState)
 {
@@ -100,127 +84,6 @@ static void drawOled(uint8_t joyState)
     }
 }
 
-
-#define NOTE_PIN_HIGH() GPIO_SetValue(0, 1<<26);
-#define NOTE_PIN_LOW()  GPIO_ClearValue(0, 1<<26);
-
-
-
-
-static uint32_t notes[] = {
-        2272, // A - 440 Hz
-        2024, // B - 494 Hz
-        3816, // C - 262 Hz
-        3401, // D - 294 Hz
-        3030, // E - 330 Hz
-        2865, // F - 349 Hz
-        2551, // G - 392 Hz
-        1136, // a - 880 Hz
-        1012, // b - 988 Hz
-        1912, // c - 523 Hz
-        1703, // d - 587 Hz
-        1517, // e - 659 Hz
-        1432, // f - 698 Hz
-        1275, // g - 784 Hz
-};
-
-static void playNote(uint32_t note, uint32_t durationMs) {
-
-    uint32_t t = 0;
-
-    if (note > 0) {
-
-        while (t < (durationMs*1000)) {
-            NOTE_PIN_HIGH();
-            Timer0_us_Wait(note / 2);
-            //delay32Us(0, note / 2);
-
-            NOTE_PIN_LOW();
-            Timer0_us_Wait(note / 2);
-            //delay32Us(0, note / 2);
-
-            t += note;
-        }
-
-    }
-    else {
-    	Timer0_Wait(durationMs);
-        //delay32Ms(0, durationMs);
-    }
-}
-
-static uint32_t getNote(uint8_t ch)
-{
-    if (ch >= 'A' && ch <= 'G')
-        return notes[ch - 'A'];
-
-    if (ch >= 'a' && ch <= 'g')
-        return notes[ch - 'a' + 7];
-
-    return 0;
-}
-
-static uint32_t getDuration(uint8_t ch)
-{
-    if (ch < '0' || ch > '9')
-        return 400;
-
-    /* number of ms */
-
-    return (ch - '0') * 200;
-}
-
-static uint32_t getPause(uint8_t ch)
-{
-    switch (ch) {
-    case '+':
-        return 0;
-    case ',':
-        return 5;
-    case '.':
-        return 20;
-    case '_':
-        return 30;
-    default:
-        return 5;
-    }
-}
-
-static void playSong(uint8_t *song) {
-    uint32_t note = 0;
-    uint32_t dur  = 0;
-    uint32_t pause = 0;
-
-    /*
-     * A song is a collection of tones where each tone is
-     * a note, duration and pause, e.g.
-     *
-     * "E2,F4,"
-     */
-
-    while(*song != '\0') {
-        note = getNote(*song++);
-        if (*song == '\0')
-            break;
-        dur  = getDuration(*song++);
-        if (*song == '\0')
-            break;
-        pause = getPause(*song++);
-
-        playNote(note, dur);
-        //delay32Ms(0, pause);
-        Timer0_Wait(pause);
-
-    }
-}
-
-static uint8_t * song = (uint8_t*) "E2,D2,C2,D2,E2,E2,E4.D2,D2,D4,E2,G2,G4.E2,D2,C2,D2,E2,E2,E3.E2,D2,D2,E2,D2,C4,";
-		//"C2.C2,D4,C4,F4,E8,";
-        //(uint8_t*)"C2.C2,D4,C4,F4,E8,C2.C2,D4,C4,G4,F8,C2.C2,c4,A4,F4,E4,D4,A2.A2,H4,F4,G4,F8,";
-        //"D4,B4,B4,A4,A4,G4,E4,D4.D2,E4,E4,A4,F4,D8.D4,d4,d4,c4,c4,B4,G4,E4.E2,F4,F4,A4,A4,G8,";
-
-
-
 static void init_ssp(void)
 {
 	SSP_CFG_Type SSP_ConfigStruct;
@@ -247,6 +110,7 @@ static void init_ssp(void)
 	PinCfg.Portnum = 2;
 	PinCfg.Pinnum = 2;
 	PINSEL_ConfigPin(&PinCfg);
+
 
 	SSP_ConfigStructInit(&SSP_ConfigStruct);
 
@@ -303,7 +167,7 @@ static void init_GPIO(void)
 	PinCfg.Pinnum = 25;
 	PINSEL_ConfigPin(&PinCfg);//rotary switch
 	GPIO_SetDir(0, 1 << 25, 0);
-	
+
 	//light_sensor
 	PinCfg.Pinnum = 5;
 	PinCfg.Portnum = 2;
@@ -323,49 +187,22 @@ int Timer(uint32_t startTicks, int delayInMs){
 	return (getTicks() - startTicks) >= delayInMs;
 }
 
-//<-----Setting Priority------
-NVIC_SetPriority(SysTick_IRQn, 1); // Timer has the highest priority.
-
-NVIC_ClearPendingIRQ(EINT3_IRQn);
-NVIC_SetPriority(EINT3_IRQn, 2); // Light has higher priority than button.
-NVIC_EnableIRQ(EINT3_IRQn);
-
-NVIC_ClearPendingIRQ(MODE_IRQn);
-NVIC_SetPriority(MODE_IRQn, 3);
-NVIC_EnableIRQ (MODE_IRQn);
-
 void EINT3_IRQHandler (void){
-	printf("EINT3\n");
-	myintsw3 = 1;
-	printf("%d\n", myintsw3);
-	if ((LPC_GPIOINT->IO2IntStatF>>5)& 0x1) {
-		light_flag = 1;
-		LPC_GPIOINT->IO2IntClr = (1<<5); // Clear the interrupt register
-		light_clearIrqStatus(); // Clear IRQ otherwise the interrupt will never be issued again.
-	}
-
-}
-
-void MODE_IRQHandler (void) {
-	
-	if((LPC_GPIOINT->IO0IntStatF)>>4 & 1){
+	if((LPC_GPIOINT->IO0IntStatF)>>4 & 1){	//sw3
 		if (MODE_TOGGLE1 == 0) {
-		        		printf("test%d/n", MODE_TOGGLE1);
-		        		MODE_TOGGLE1 = 1;
-		        		MODE_TOGGLE = 1;
-		        	} else{
-		MODE_TOGGLE = 2;
-		        	}
+			MODE_TOGGLE1 = 1;
+			MODE_TOGGLE = 1;
+			modeTimer = getTicks();
+		} else{
+			MODE_TOGGLE = 2;
+		}
 
-		printf("sw3EINT\n");
-		LPC_GPIOINT->IO0IntClr = 1<<4;
-		printf("%d", MODE_TOGGLE);
+		LPC_GPIOINT->IO0IntClr = 1<<4;     	//clearing interrupt
 	}
-// 	if ((LPC_GPIOINT->IO0IntStatF)>>25 & 1){
-// 		printf("P0.25 has been rotated \n");
-// 		LPC_GPIOINT->IO0IntClr = 1<<25;
-// 	}
-// 	printf("Exit OK\n");
+
+	if ((LPC_GPIOINT->IO0IntStatF)>>25 & 1){	//p0.25 rotation
+		LPC_GPIOINT->IO0IntClr = 1<<25;
+	}
 }
 
 void ready_uart(void){
@@ -397,6 +234,11 @@ void ready_uart(void){
 	// FIFO configuration- For system enhancements only
 	//
 }
+static char ssg[] = {
+        '0','1','2','3','4','5','6','7','8','9','A','B','C','D','E','F'
+};
+
+
 
 int main (void) {
 
@@ -406,11 +248,8 @@ int main (void) {
     int32_t zoff = 0;
 
     int8_t x = 0;
-
     int8_t y = 0;
     int8_t z = 0;
-    uint8_t dir = 1;
-    uint8_t wait = 0;
 
     uint8_t state    = 0;
 
@@ -418,9 +257,18 @@ int main (void) {
     uint8_t btnSW3 = 1;
     uint8_t btn1 = 1;
 
-    uint32_t startTicks = getTicks();
-    uint32_t rgbTimer = startTicks, modeTimer = startTicks;
+	uint16_t ledval[] = {0x0001, 0x0003, 0x0007, 0x000F, 0x001F, 0x003F, 0x007F, 0x00FF,
+			0x01FF, 0x03FF, 0x07FF, 0x0FFF, 0x1FFF, 0x3FFF, 0x7FFF, 0xFFFF};
 
+    uint32_t startTicks = getTicks();
+    uint32_t rgbTimer = startTicks;
+
+    //7seg disp initialisation
+    uint32_t ForTimer = startTicks, RevTimer = startTicks;
+    int ssegdisp=0;
+    int RGB = 0;
+    int near_flag = 1;
+    int counter = 0;
 
     init_i2c();
     init_ssp();
@@ -445,102 +293,45 @@ int main (void) {
     yoff = 0-y;
     zoff = 64-z;
 
-    /* ---- Speaker ------> */
-
-    GPIO_SetDir(2, 1<<0, 1);
-    GPIO_SetDir(2, 1<<1, 1);
-
-    GPIO_SetDir(0, 1<<27, 1);
-    GPIO_SetDir(0, 1<<28, 1);
-    GPIO_SetDir(2, 1<<13, 1);
-    GPIO_SetDir(0, 1<<26, 1);
-
-    GPIO_ClearValue(0, 1<<27); //LM4811-clk
-    GPIO_ClearValue(0, 1<<28); //LM4811-up/dn
-    GPIO_ClearValue(2, 1<<13); //LM4811-shutdn
-
-    /* <---- Speaker ------ */
-
-    moveBar(1, dir);
-    oled_clearScreen(OLED_COLOR_BLACK);
 	uint32_t my_light_value;
 	int32_t my_temp_value;
 
 	/* <---- UART ----- */
-	static char* msg = NULL;
+	unsigned char msg[100] = "";
 	uint8_t data = 0;
 	uint32_t len = 0;
 	uint8_t line[64];
 	uint8_t line_count = 0;
 
 	ready_uart();
-	
-	/* <----- LIGHTSENSOR ----- */
-	light_setRange(LIGHT_RANGE_4000);
-	light_setLoThreshold(lightLoLimit);
-	light_setHiThreshold(lightHiLimit);
-	light_setIrqInCycles(LIGHT_CYCLE_1);
-	light_clearIrqStatus();
-	LPC_GPIOINT->IO2IntClr = 1 << 5;
-	LPC_GPIOINT->IO2IntEnF |= 1 << 5; //falling edge interrupt for p2.5
-	
-	//sw3
+
 	LPC_GPIOINT->IO0IntEnF |= 1 << 4;
 	LPC_GPIOINT->IO0IntEnF |= 1 <<25;
 
+	//<-----Setting Priority------
+	NVIC_SetPriorityGrouping(5);
+	NVIC_SetPriority(SysTick_IRQn, 0x00); // Timer has the highest priority.
+
+	NVIC_ClearPendingIRQ(EINT3_IRQn);
+	NVIC_SetPriority(EINT3_IRQn, 0x18); // sw3 second priority
+	NVIC_EnableIRQ(EINT3_IRQn);
+
 	void reset() {
 		led7seg_setChar('{',FALSE); // Clear 7SEG display
+		ssegdisp = 0; //reset display
 		pca9532_setLeds(0, 0xffff); // Clear floodlights
-		GPIO_ClearValue( 2, 1); // Clear red
+
+		GPIO_ClearValue( 2, (1<<0)); // Clear red
 		GPIO_ClearValue( 0, (1<<26) ); // Clear blue
 		oled_clearScreen(OLED_COLOR_BLACK); // cls
 	}
+	reset();
+
+	//LIGHT SENSOR
+	light_setRange(LIGHT_RANGE_4000);
 
     while (1)
     {
-    	/* <---- UART ----- */
-    	// Send a string message from the LPC1769 to the UART terminal
-    	msg = "Welcome to EE2024 \r\n";
-    	UART_Send(LPC_UART3, (uint8_t *)msg , strlen(msg), BLOCKING);
-
-
-
-    	// LPC1769 receives a character from the UART terminal, and then sends back that character to the UART terminal
-//    	UART_Receive(LPC_UART3, &data, 1, BLOCKING);
-//    	UART_Send(LPC_UART3, &data, 1, BLOCKING);
-
-
-
-    	// LPC1769 receives a string ended by a return carriage from the UART terminal, and then sends back that string to the UART terminal
-//    	do
-//    	{
-//    		UART_Receive(LPC_UART3, &data, 1, BLOCKING);
-//    		if (data != '\r')
-//    		{
-//    			len++;
-//    			line[len-1] = data;
-//    		}
-//    	}
-//    	while ((len<64) && (data != '\r'));
-//
-//    	line[len]=0;
-//    	UART_SendString(LPC_UART3, &line);
-//    	printf("--%s--\n", line);
-//    	for (line_count = 0; line_count <64; line_count++)
-//    	{
-//    		line[line_count] = ' ';
-//    	}
-//    	len = 0;
-	    
-	//test light_interrupt
-	printf("%d\n", light_flag);
-
-    	my_temp_value = temp_read();
-    	//printf("The temp value is %2.2f \n",my_temp_value/10.0);
-
-        my_light_value = light_read();
-        //printf("The light value is %u \n",my_light_value);
-    	//printf("%d \n", myintsw3); //test sw3 interrupt
 
         /* ####### Accelerometer and LEDs  ###### */
         /* # */
@@ -550,31 +341,6 @@ int main (void) {
         y = y+yoff;
         z = z+zoff;
 
-        if (y < 0) {
-            dir = 1;
-            y = -y;
-        }
-        else {
-            dir = -1;
-        }
-
-        if (y > 1 && wait++ > (40 / (1 + (y/10)))) {
-            moveBar(1, dir);
-            wait = 0;
-        }
-
-
-        /* # */
-        /* ############################################# */
-
-
-        /* ####### Joystick and OLED  ###### */
-        /* # */
-
-        state = joystick_read();
-        if (state != 0)
-            drawOled(state);
-
         /* # */
         /* ############################################# */
 
@@ -582,123 +348,192 @@ int main (void) {
         				btnSW3 = (GPIO_ReadValue(0) >> 4) & 0x01;
         				btn1 = (GPIO_ReadValue(2) >> 10) & 0x01;
 
-//        sprintf(oled_disp, "Gforce: %.1f", x/9.8);
-//        oled_putString(10,10,(uint8_t *) oled_disp, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
-//        sprintf(oled_disp, "Temp: %2.2f", my_temp_value/10.0 );
-//        oled_putString(10,20,(uint8_t *) oled_disp, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
-//        sprintf(oled_disp, "Light: %u", my_light_value);
-//        oled_putString(10,30,(uint8_t *) oled_disp, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
+
 //
 //        /* ############ Trimpot and RGB LED  ########### */
 //        /* # */
-//
-//        //led7seg_setChar('9',FALSE);
-//        if (btnSW3 == 0)
-//        {
-//        	pca9532_setLeds(0xAA00,0xFFFF);
-//        	led7seg_setChar('1',FALSE);
-//        	//GPIO_SetValue( 2, (1 << 1) );
-//        	//rgb_setLeds(RGB_RED);
-//        	//GPIO_SetValue( 2, (1 << 1) );
-//
-//        } else {
-//        	pca9532_setLeds(0x00AA,0xFFFF);
-//        	//rgb_setLeds(RGB_BLUE);
-//        	//GPIO_SetValue( 2, (1 << 1) );
-//        	led7seg_setChar('0',FALSE);
-//        }
 
-//    	if (Timer(rgbTimer, 333)){
-//    		GPIO_ClearValue( 2, (1<<1) );
-//    		rgb_setLeds(RGB_RED);
-//    	}
-//    	if (Timer(rgbTimer, 666)){
-//    		GPIO_ClearValue(2,1);
-//    		rgbTimer=getTicks();
-//    	}
 
     	/* ############ MODES  ########### */
+
         if (MODE_TOGGLE1 && Timer(modeTimer, 1000)) {
-        	printf("inside\n");
         	if(MODE_TOGGLE == 1) {
         		if(mode == MODE_STAT) {
                		mode = MODE_FOR;
+               		reset();
+               		ForTimer = getTicks();
         			MODE_TOGGLE1 = 0;
         			MODE_TOGGLE = 0;
+        			sprintf(msg,"Entering Forward mode \r\n");
+					UART_Send(LPC_UART3, (uint8_t *)msg , strlen(msg), BLOCKING);
         		} else if (mode == MODE_FOR) {
         			mode = MODE_STAT;
+        			reset();
                		MODE_TOGGLE1 = 0;
                		MODE_TOGGLE = 0;
         		} else if (mode == MODE_REV){
         			mode = MODE_STAT;
+        			reset();
         			MODE_TOGGLE1 = 0;
         			MODE_TOGGLE = 0;
         		}
         	}
-
 
         	if(MODE_TOGGLE == 2) {
         		if(mode == MODE_STAT) {
         			mode = MODE_REV;
+        			reset();
+        			RevTimer = getTicks();
         			MODE_TOGGLE1 = 0;
         			MODE_TOGGLE = 0;
+        	    	sprintf(msg,"Entering Reverse mode \r\n");
+        	    	UART_Send(LPC_UART3, (uint8_t *)msg , strlen(msg), BLOCKING);
         		} else {
         			mode = MODE_STAT;
+        			reset();
         			MODE_TOGGLE1 = 0;
         			MODE_TOGGLE = 0;
         		}
         	}
 
         	}
-//        }
-
-//        if (Timer(modeTimer, 1000)) {
-//        	if(MODE_TOGGLE1){
-//        	if(mode == MODE_STAT) {
-//        		mode = MODE_REV;
-//        	}
-//        	//(MODE_TOGGLE) = 0;
-//        	}
-//        	if(MODE_TOGGLE++){
-//        		if(mode == MODE_STAT) {
-//        			mode = MODE_FOR;
-//        			} else if (mode == MODE_FOR) {
-//        				mode = MODE_STAT;
-//        				} else if (mode == MODE_REV) {
-//        					mode = MODE_STAT;
-//        			        	}
-//        		}
-
-//        	modeTimer = getTicks();
-//        	(MODE_TOGGLE) = 0;
-//        }
-//
     	switch (mode) {
     	case MODE_STAT	:
-    		reset();
+    		sprintf(oled_disp, "Stationary");
+    		oled_putString(5,3,(uint8_t *) oled_disp, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
+
     		break;
 
     	case MODE_FOR:
-    		rgb_setLeds(RGB_RED);
+    		sprintf(oled_disp, "Forward");
+    		oled_putString(5,3,(uint8_t *) oled_disp, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
+
 			//light and ledarray idle
+    		//Every second
+
+    		if(Timer(ForTimer,1000)){
+
+				ForTimer = getTicks();
+    			led7seg_setChar(ssg[ssegdisp],FALSE);
+
+			//temp and acc sampled every 1s
+
+				my_temp_value = temp_read();
+				if(counter>=100){
+					sprintf(msg, "%d_TEMP_%2.2f_ACC_%2.2f \r\n",counter, my_temp_value/10.0, x/64.0);
+				} else if(counter >=10){
+					sprintf(msg, "0%d_TEMP_%2.2f_ACC_%2.2f \r\n",counter, my_temp_value/10.0, x/64.0);
+				} else {
+					sprintf(msg, "00%d_TEMP_%2.2f_ACC_%2.2f \r\n",counter, my_temp_value/10.0, x/64.0);
+				}
+				UART_Send(LPC_UART3, (uint8_t *)msg , strlen(msg), BLOCKING);
+				counter++;
+    			if(my_temp_value <HI_TEMP_THRESHOLD || x/64.0< HI_ACC_THRESHOLD){
+					sprintf(oled_disp, "                 ");
+					oled_putString(5,33,(uint8_t *) oled_disp, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
+					oled_putString(5,43,(uint8_t *) oled_disp, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
+					oled_putString(5,53,(uint8_t *) oled_disp, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
+    			}
+
+				if(ssegdisp == 5 || ssegdisp == 10 || ssegdisp == 15){
+					sprintf(oled_disp, "Temp: %2.2f", my_temp_value/10.0 );
+					oled_putString(5,13,(uint8_t *) oled_disp, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
+					sprintf(oled_disp, "Acc: %2.2f", x/64.0 );
+					oled_putString(5,23,(uint8_t *) oled_disp, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
+				}
+				if(my_temp_value >= HI_TEMP_THRESHOLD){
+					sprintf(msg, "Temperature too high.\r\n");
+					UART_Send(LPC_UART3, (uint8_t *)msg , strlen(msg), BLOCKING);
+					sprintf(oled_disp, "Temp. too high");
+					oled_putString(5,33,(uint8_t *) oled_disp, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
+				}
+				if(x/64.0 >=HI_ACC_THRESHOLD){
+					sprintf(msg, "Collision has been detected.\r\n");
+					UART_Send(LPC_UART3, (uint8_t *)msg , strlen(msg), BLOCKING);
+					sprintf(oled_disp, "Air bag");
+					if(my_temp_value>=HI_TEMP_THRESHOLD){
+						oled_putString(5,43,(uint8_t *) oled_disp, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
+					} else {
+						oled_putString(5,33,(uint8_t *) oled_disp, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
+					}
+					sprintf(oled_disp, "released");
+					if(my_temp_value>=HI_TEMP_THRESHOLD){
+						oled_putString(5,53,(uint8_t *) oled_disp, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
+					} else {
+						oled_putString(5,43,(uint8_t *) oled_disp, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
+					}
+				}
+
+
 			//7seg disp hex value increase by 1 every second
-			//temp and acc smapled every 1s
+				if(ssegdisp != 15){
+					ssegdisp++;
+				} else {
+					ssegdisp = 0;
+				}
+
+    		}
+    		//blinking rgb
+			if(Timer(rgbTimer,333)){
+				if(RGB == 0){
+					if(my_temp_value >= HI_TEMP_THRESHOLD){
+						rgb_setLeds(RGB_RED);
+					} else {
+						GPIO_ClearValue(2, (1<<0));
+					}
+					if(x/64.0 >= HI_ACC_THRESHOLD){
+						rgb_setLeds(RGB_BLUE);
+					} else {
+						GPIO_ClearValue( 0, (1<<26) );
+					}
+					RGB = 1;
+				} else if(RGB == 1){
+					GPIO_ClearValue(2, (1<<0));
+					GPIO_ClearValue(0, (1<<26) );
+					RGB = 0;
+				}
+				rgbTimer = getTicks();
+			}
+
 			//blink red if temp exceeeds threshold
 			//blink blue if acc exceeds threshold
     		break;
 
     	case MODE_REV:
-    		rgb_setLeds(RGB_BLUE);
+    		sprintf(oled_disp, "Reverse");
+    		oled_putString(5,3,(uint8_t *) oled_disp, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
+    		//rgb_setLeds(RGB_BLUE);
 			//light smapled every 1s
-			//ledarray proportional to light sensor value
+    		if(Timer(RevTimer,1000)){
+    			RevTimer = getTicks();
+				my_light_value = light_read();
+				sprintf(oled_disp, "                  ");
+				oled_putString(5,13,(uint8_t *) oled_disp, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
+    			sprintf(oled_disp, "Light: %u", my_light_value);
+				oled_putString(5,13,(uint8_t *) oled_disp, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
+
+				//ledarray proportional to light sensor value
+				pca9532_setLeds(ledval[my_light_value/243],0xFFFF);
+				if(my_light_value >=3000){
+	    			sprintf(oled_disp, "Obstacle too");
+					oled_putString(5,23,(uint8_t *) oled_disp, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
+	    			sprintf(oled_disp, "near");
+					oled_putString(5,33,(uint8_t *) oled_disp, OLED_COLOR_WHITE, OLED_COLOR_BLACK);
+					if(near_flag){
+						sprintf(msg,"Obstacle too near \r\n");
+						UART_Send(LPC_UART3, (uint8_t *)msg , strlen(msg), BLOCKING);
+						near_flag = 0;
+					}
+				} else {
+					near_flag = 1;
+				}
+    		}
+
 			//temp and acc idle
     		break;
 
     	}
 
-//        rgb_setLeds(RGB_RED);
-
-       // Timer0_Wait(1);
     }
 
 
